@@ -1,6 +1,8 @@
+use ballista::prelude::{SessionConfigExt, SessionContextExt};
 use datafusion::common::Result;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::MemTable;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_plan::displayable;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion::scalar::ScalarValue;
@@ -53,11 +55,15 @@ struct Opt {
 
     /// Concurrency, determining the number of partitions for queries
     #[structopt(short, long)]
-    concurrency: u8,
+    concurrency: Option<u8>,
 
     /// Iterations (number of times to run each query)
     #[structopt(short, long)]
-    iterations: u8,
+    iterations: Option<u8>,
+
+    /// Ballista scheduler address
+    #[structopt(short, long)]
+    scheduler: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Default)]
@@ -99,7 +105,12 @@ pub async fn main() -> Result<()> {
     let query_path = format!("{}", opt.query_path.display());
     let output_path = format!("{}", opt.output.display());
 
-    let mut config = SessionConfig::new().with_target_partitions(opt.concurrency as usize);
+    let mut config = match opt.scheduler {
+        None => SessionConfig::new()
+            .with_target_partitions(opt.concurrency.unwrap_or_else(|| 8) as usize),
+        Some(_) => SessionConfig::new_with_ballista()
+            .with_target_partitions(opt.concurrency.unwrap_or_else(|| 8) as usize),
+    };
 
     if let Some(config_path) = &opt.config_path {
         let file = File::open(config_path)?;
@@ -113,7 +124,7 @@ pub async fn main() -> Result<()> {
             let parts = line.split('=');
             let parts = parts.collect::<Vec<&str>>();
             if parts.len() == 2 {
-                config = config.set(parts[0], ScalarValue::Utf8(Some(parts[1].to_string())));
+                config = config.set(parts[0], &ScalarValue::Utf8(Some(parts[1].to_string())));
             } else {
                 println!("Warning! Skipping config entry {}", line);
             }
@@ -128,7 +139,17 @@ pub async fn main() -> Result<()> {
 
     // register all tables in data directory
     let start = Instant::now();
-    let ctx = SessionContext::new_with_config(config);
+
+    let ctx = match opt.scheduler {
+        None => SessionContext::new_with_config(config),
+        Some(url) => {
+            let state = SessionStateBuilder::new()
+                .with_config(config)
+                .with_default_features()
+                .build();
+            SessionContext::remote_with_state(&url, state).await?
+        }
+    };
     for file in fs::read_dir(&opt.data_path)? {
         let file = file?;
         let file_path = file.path();
@@ -137,7 +158,7 @@ pub async fn main() -> Result<()> {
             let filename = Path::file_name(&file_path).unwrap().to_str().unwrap();
             let table_name = &filename[0..filename.len() - 8];
             println!("Registering table {} as {}", table_name, path);
-            ctx.register_parquet(&table_name, &path, ParquetReadOptions::default())
+            ctx.register_parquet(&*table_name, &path, ParquetReadOptions::default())
                 .await?;
         }
     }
@@ -154,7 +175,7 @@ pub async fn main() -> Result<()> {
                 query,
                 opt.debug,
                 &output_path,
-                opt.iterations,
+                opt.iterations.unwrap_or(1),
                 &mut results,
             )
             .await?;
@@ -173,7 +194,7 @@ pub async fn main() -> Result<()> {
                     query,
                     opt.debug,
                     &output_path,
-                    opt.iterations,
+                    opt.iterations.unwrap_or(1),
                     &mut results,
                 )
                 .await;
@@ -276,6 +297,8 @@ pub async fn execute_query(
                 if batches.is_empty() {
                     println!("Empty result set returned");
                 } else {
+                    // this context is created just to write output
+                    let ctx = SessionContext::new();
                     let filename = format!("{}/q{}{}.csv", output_path, query_no, file_suffix);
                     let t = MemTable::try_new(batches[0].schema(), vec![batches])?;
                     let df = ctx.read_table(Arc::new(t))?;

@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-datafusion = "39.0.0"
-serde = { version = "1.0.203", features = ["derive"] }
+datafusion = "48.0.1"
+ballista = "48.0.0"
+serde = { version = "1.0.219", features = ["derive"] }
 structopt = "0.3.26"
-tokio = {  version = "1.38.0", features = ["rt-multi-thread"] }
-serde_json = "1.0.117"
+tokio = {  version = "1.47.1", features = ["rt-multi-thread"] }
+serde_json = "1.0.143"
+# indicatif = "0.18"
+# console = "0.16"
