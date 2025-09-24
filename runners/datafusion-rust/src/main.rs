@@ -7,16 +7,21 @@ use datafusion::physical_plan::displayable;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion::scalar::ScalarValue;
 use datafusion::DATAFUSION_VERSION;
+use mimalloc::MiMalloc;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use structopt::StructOpt;
 use tokio::time::Instant;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "basic")]
@@ -55,7 +60,7 @@ struct Opt {
 
     /// Concurrency, determining the number of partitions for queries
     #[structopt(short, long)]
-    concurrency: Option<u8>,
+    concurrency: Option<usize>,
 
     /// Iterations (number of times to run each query)
     #[structopt(short, long)]
@@ -104,12 +109,19 @@ pub async fn main() -> Result<()> {
 
     let query_path = format!("{}", opt.query_path.display());
     let output_path = format!("{}", opt.output.display());
-
     let mut config = match opt.scheduler {
-        None => SessionConfig::new()
-            .with_target_partitions(opt.concurrency.unwrap_or_else(|| 8) as usize),
-        Some(_) => SessionConfig::new_with_ballista()
-            .with_target_partitions(opt.concurrency.unwrap_or_else(|| 8) as usize),
+        None => SessionConfig::new().with_target_partitions(opt.concurrency.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .unwrap_or_else(|_| NonZero::new(8).unwrap())
+                .get()
+        }) as usize),
+        Some(_) => SessionConfig::new_with_ballista().with_target_partitions(
+            opt.concurrency.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .unwrap_or_else(|_| NonZero::new(8).unwrap())
+                    .get()
+            }) as usize,
+        ),
     };
 
     if let Some(config_path) = &opt.config_path {
@@ -150,6 +162,7 @@ pub async fn main() -> Result<()> {
             SessionContext::remote_with_state(&url, state).await?
         }
     };
+
     for file in fs::read_dir(&opt.data_path)? {
         let file = file?;
         let file_path = file.path();
