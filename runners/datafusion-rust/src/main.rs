@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,10 +57,6 @@ struct Opt {
     #[structopt(short, long)]
     exclude: Vec<u8>,
 
-    /// Concurrency, determining the number of partitions for queries
-    #[structopt(short, long)]
-    concurrency: Option<usize>,
-
     /// Iterations (number of times to run each query)
     #[structopt(short, long)]
     iterations: Option<u8>,
@@ -69,6 +64,13 @@ struct Opt {
     /// Ballista scheduler address
     #[structopt(short, long)]
     scheduler: Option<String>,
+
+    /// Configuration overrides in key=value format.
+    /// Can be specified multiple times, e.g.
+    /// -c ballista.shuffle.sort_based.enabled=true
+    /// -c datafusion.execution.target_partitions=16
+    #[structopt(short = "c", long = "config", number_of_values = 1)]
+    config_overrides: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Default)]
@@ -109,20 +111,10 @@ pub async fn main() -> Result<()> {
 
     let query_path = format!("{}", opt.query_path.display());
     let output_path = format!("{}", opt.output.display());
-    let mut config = match opt.scheduler {
-        None => SessionConfig::new().with_target_partitions(opt.concurrency.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .unwrap_or_else(|_| NonZero::new(8).unwrap())
-                .get()
-        }) as usize),
-        Some(_) => SessionConfig::new_with_ballista().with_target_partitions(
-            opt.concurrency.unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .unwrap_or_else(|_| NonZero::new(8).unwrap())
-                    .get()
-            }) as usize,
-        ),
-    };
+
+    let mut config = SessionConfig::new_with_ballista()
+        .with_ballista_job_name(&format!("Queries derived from TPC-DS"))
+        .with_collect_statistics(true);
 
     if let Some(config_path) = &opt.config_path {
         let file = File::open(config_path)?;
@@ -146,6 +138,20 @@ pub async fn main() -> Result<()> {
     for entry in config.options().entries() {
         if let Some(ref value) = entry.value {
             results.config.insert(entry.key, value.to_string());
+        }
+    }
+
+    for kv in &opt.config_overrides {
+        if let Some((key, value)) = kv.split_once('=') {
+            if let Err(e) = config.options_mut().set(key.trim(), value.trim()) {
+                println!("Warning: could not set config '{}': {}", kv, e);
+            }
+        } else {
+            println!(
+                "Warning: ignoring invalid config override '{}'. \
+                     Expected format: key=value",
+                kv
+            );
         }
     }
 
@@ -182,6 +188,14 @@ pub async fn main() -> Result<()> {
 
     match opt.query {
         Some(query) => {
+            let job_name_query = format!("SET ballista.job.name='TPC-DS Q{}'", query);
+            ctx.sql(&job_name_query)
+                .await
+                .expect("query name to be set")
+                .collect()
+                .await
+                .expect("query name to be set");
+
             execute_query(
                 &ctx,
                 &query_path,
@@ -200,6 +214,13 @@ pub async fn main() -> Result<()> {
                     println!("Skipping query {}", query);
                     continue;
                 }
+                let job_name_query = format!("SET ballista.job.name='TPC-DS Q{}'", query);
+                ctx.sql(&job_name_query)
+                    .await
+                    .expect("query name to be set")
+                    .collect()
+                    .await
+                    .expect("query name to be set");
 
                 let result = execute_query(
                     &ctx,
