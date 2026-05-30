@@ -135,12 +135,6 @@ pub async fn main() -> Result<()> {
         }
     }
 
-    for entry in config.options().entries() {
-        if let Some(ref value) = entry.value {
-            results.config.insert(entry.key, value.to_string());
-        }
-    }
-
     for kv in &opt.config_overrides {
         if let Some((key, value)) = kv.split_once('=') {
             if let Err(e) = config.options_mut().set(key.trim(), value.trim()) {
@@ -152,6 +146,12 @@ pub async fn main() -> Result<()> {
                      Expected format: key=value",
                 kv
             );
+        }
+    }
+
+    for entry in config.options().entries() {
+        if let Some(ref value) = entry.value {
+            results.config.insert(entry.key, value.to_string());
         }
     }
 
